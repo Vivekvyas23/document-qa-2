@@ -3,215 +3,210 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from io import BytesIO
-import joblib
 import base64
-
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import (
-    accuracy_score, confusion_matrix, classification_report,
-    roc_curve, auc
-)
+import joblib
 import matplotlib.pyplot as plt
 
-st.set_page_config(page_title="Damage-Detection Trainer (no Pipeline)", layout="wide")
-st.title("🔧 Damage-Detection Trainer (Logistic Regression, no Pipeline)")
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, roc_curve, auc
+
+st.set_page_config(page_title="AE Features -> Logistic Regression", layout="wide")
+st.title("AE Features → Logistic Regression Trainer")
 
 st.markdown("""
-Upload a CSV containing numeric feature columns and a label column.
-This app trains a `StandardScaler` (separately) and a `LogisticRegression`,
-shows metrics (accuracy, confusion matrix, ROC), and provides a downloadable `.pkl`
-that contains the scaler, model, and the feature order.
+Upload your `ae_features_all.csv` (or place it in the app folder).  
+The app will:
+- Drop `File_id` and `Label` from features (you can change these),
+- Convert `Label` to numeric (Healthy -> 0, others -> 1),
+- Train a Logistic Regression,
+- Show metrics and confusion matrix,
+- Let you download the trained `.pkl`.
 """)
 
 # -------------------------
-# File uploader / load data
+# File input
 # -------------------------
-uploaded = st.file_uploader("Upload CSV file with features (CSV)", type=["csv"])
-use_example = st.checkbox("Use example synthetic features (demo)", value=False)
-
-if uploaded is None and not use_example:
-    st.info("Upload a CSV or tick 'Use example synthetic features' to try the app.")
-    st.stop()
-
-if use_example:
-    st.warning("Using synthetic example data (not your real data).")
-    rng = np.random.RandomState(42)
-    n = 300
-    X1 = rng.normal(loc=0.0, scale=1.0, size=(n, 6))
-    X2 = rng.normal(loc=1.2, scale=1.1, size=(n, 6))
-    X = np.vstack([X1, X2])
-    df = pd.DataFrame(X, columns=["RMS", "PeakToPeak", "Kurtosis", "Skewness", "SpectralCentroid", "SpectralEntropy"])
-    df["label"] = np.hstack([np.zeros(n), np.ones(n)])
+uploaded = st.file_uploader("Upload ae_features_all.csv (or leave empty to load local file named 'ae_features_all.csv')", type=["csv"])
+use_local = False
+if uploaded is None:
+    st.info("No uploaded file. Will try to load 'ae_features_all.csv' from the app folder if present.")
+    try:
+        data = pd.read_csv("ae_features_all.csv")
+        use_local = True
+        st.success("Loaded local file 'ae_features_all.csv'.")
+    except FileNotFoundError:
+        st.warning("Local file not found. Upload a CSV to proceed.")
+        st.stop()
 else:
     try:
-        df = pd.read_csv(uploaded)
+        data = pd.read_csv(uploaded)
+        st.success("Uploaded CSV loaded.")
     except Exception as e:
-        st.error(f"Failed to read CSV: {e}")
+        st.error(f"Failed to read uploaded CSV: {e}")
         st.stop()
 
-st.subheader("Preview data")
-st.dataframe(df.head(10))
+st.subheader("Preview of data")
+st.dataframe(data.head())
 
 # -------------------------
-# Sidebar - options
+# Options / preprocessing
 # -------------------------
-st.sidebar.header("Training options")
-cols = df.columns.tolist()
-label_col = st.sidebar.selectbox("Select label column (target)", options=cols, index=(cols.index("label") if "label" in cols else 0))
-st.sidebar.write(f"Using `{label_col}` as label/target.")
+st.sidebar.header("Preprocessing & training options")
 
-# Infer numeric columns for features excluding label
-feature_cols = [c for c in cols if c != label_col and pd.api.types.is_numeric_dtype(df[c])]
-if len(feature_cols) == 0:
-    st.error("No numeric feature columns detected. Ensure your CSV has numeric features (and a numeric label).")
-    st.stop()
-
-chosen_features = st.sidebar.multiselect("Select features to use (ctrl/shift-click to multi-select)", options=feature_cols, default=feature_cols)
-if len(chosen_features) == 0:
-    st.error("Pick at least one feature column.")
-    st.stop()
-
-test_size = st.sidebar.slider("Test set fraction", 0.05, 0.5, value=0.2, step=0.05)
+drop_fileid = st.sidebar.checkbox("Drop 'File_id' column if present", value=True)
+drop_band = st.sidebar.checkbox("Drop 'Band' column if present", value=False)
+label_col = st.sidebar.text_input("Label column name", value="Label")
+label_mapping_health = st.sidebar.text_input("Value representing 'Healthy' in label column", value="Healthy")
+apply_scaling = st.sidebar.checkbox("Apply StandardScaler (fit on train set)", value=True)
+test_size = st.sidebar.slider("Test set fraction", min_value=0.05, max_value=0.5, value=0.3, step=0.05)
 random_state = st.sidebar.number_input("Random seed", value=42, step=1)
-penalty = st.sidebar.selectbox("Logistic penalty", options=["l2", "none"], index=0)
-C_val = st.sidebar.number_input("Inverse regularization C (larger = less reg)", min_value=0.0001, value=1.0, step=0.1, format="%.4f")
-max_iter = st.sidebar.number_input("Max iterations", min_value=50, max_value=10000, value=1000, step=50)
 
 # -------------------------
-# Prepare X, y
+# Prepare X and y (mimic your script)
 # -------------------------
-y_raw = df[label_col]
-# Factorize non-numeric labels
-if y_raw.dtype == object or not np.issubdtype(y_raw.dtype, np.number):
-    y = pd.factorize(y_raw)[0]
-else:
-    y = y_raw.values
+df = data.copy()
 
-X_df = df[chosen_features].copy()
-X = X_df.values
+# Drop specified columns if present
+cols_to_drop = []
+if drop_fileid and 'File_id' in df.columns:
+    cols_to_drop.append('File_id')
+if drop_band and 'Band' in df.columns:
+    cols_to_drop.append('Band')
+# Always keep label_col for now
+# Drop them later from X
+if len(cols_to_drop) > 0:
+    st.sidebar.write(f"Dropping columns: {cols_to_drop}")
 
-unique_labels = np.unique(y)
-if unique_labels.shape[0] != 2:
-    st.warning(f"Detected labels: {unique_labels}. Logistic regression expects binary target but will still train.")
+# Check label column exists
+if label_col not in df.columns:
+    st.error(f"Label column '{label_col}' not found in data. Please correct the label column name in the sidebar.")
+    st.stop()
+
+# Map labels to 0/1
+def map_label(val):
+    try:
+        # string comparison if provided as string
+        if isinstance(val, str):
+            return 0 if val.strip() == label_mapping_health else 1
+        else:
+            # numeric or other: treat as 0 if equals mapping string cast, else 1
+            return 0 if str(val) == str(label_mapping_health) else 1
+    except Exception:
+        return 1
+
+y = df[label_col].apply(map_label).astype(int)
+
+# Build X by dropping label and optional columns
+X = df.drop(columns=[label_col] + [c for c in cols_to_drop if c in df.columns], errors='ignore')
+
+# Remove non-numeric columns from X (or attempt to convert)
+non_numeric = [c for c in X.columns if not pd.api.types.is_numeric_dtype(X[c])]
+if non_numeric:
+    st.warning(f"Found non-numeric columns in features. They will be dropped: {non_numeric}")
+    X = X.drop(columns=non_numeric)
+
+if X.shape[1] == 0:
+    st.error("No numeric feature columns remain after dropping. Cannot train.")
+    st.stop()
+
+st.write("Feature columns used:", X.columns.tolist())
 
 # -------------------------
-# Train / Validate
+# Train button
 # -------------------------
-if st.button("Train model"):
-    with st.spinner("Training logistic regression (separate StandardScaler + LogisticRegression)..."):
-        try:
-            stratify_arg = y if len(unique_labels) == 2 else None
-            X_train, X_test, y_train, y_test = train_test_split(
-                X, y, test_size=test_size, random_state=int(random_state), stratify=stratify_arg
-            )
-        except Exception as e:
-            st.error(f"Failed during train_test_split: {e}")
-            st.stop()
+if st.button("Train Logistic Regression (as in your code)"):
+    # Train/test split
+    try:
+        X_train, X_test, y_train, y_test = train_test_split(
+            X.values, y.values, test_size=float(test_size), random_state=int(random_state), stratify=y.values
+        )
+    except Exception as e:
+        st.error(f"train_test_split failed: {e}")
+        st.stop()
 
-        # StandardScaler (fit on train only)
+    # Optional scaling (mimics good practice; can be turned off to match original code exactly)
+    scaler = None
+    if apply_scaling:
         scaler = StandardScaler()
         X_train_scaled = scaler.fit_transform(X_train)
         X_test_scaled = scaler.transform(X_test)
+    else:
+        X_train_scaled = X_train
+        X_test_scaled = X_test
 
-        # Logistic Regression (no sklearn Pipeline)
-        solver_choice = "lbfgs" if penalty == "l2" else "saga"
-        try:
-            model = LogisticRegression(penalty=penalty, C=float(C_val), max_iter=int(max_iter), solver=solver_choice)
-        except Exception:
-            # fallback if 'none' isn't accepted
-            model = LogisticRegression(penalty="l2", C=float(C_val), max_iter=int(max_iter), solver="lbfgs")
+    # Train logistic regression
+    try:
+        model = LogisticRegression(random_state=int(random_state), max_iter=1000)
+        model.fit(X_train_scaled, y_train)
+    except Exception as e:
+        st.error(f"Training failed: {e}")
+        st.stop()
 
-        try:
-            model.fit(X_train_scaled, y_train)
-        except Exception as e:
-            st.error(f"Training failed: {e}")
-            st.stop()
+    # Predictions
+    y_pred = model.predict(X_test_scaled)
+    y_prob = None
+    try:
+        y_prob = model.predict_proba(X_test_scaled)[:, 1]
+    except Exception:
+        y_prob = None
 
-        # Predictions & Scores
-        y_pred = model.predict(X_test_scaled)
-        if hasattr(model, "predict_proba"):
-            y_score = model.predict_proba(X_test_scaled)[:, 1]
-        else:
-            try:
-                y_score = model.decision_function(X_test_scaled)
-            except Exception:
-                y_score = None
+    # Metrics
+    acc = accuracy_score(y_test, y_pred)
+    report = classification_report(y_test, y_pred)
+    cm = confusion_matrix(y_test, y_pred)
 
-        acc = accuracy_score(y_test, y_pred)
-        cm = confusion_matrix(y_test, y_pred)
-        report = classification_report(y_test, y_pred, output_dict=False)
+    st.subheader("=== Logistic Regression Model Evaluation ===")
+    st.write(f"**Accuracy:** {acc:.4f}")
+    st.write("**Classification Report:**")
+    st.text(report)
 
-        st.success(f"Training completed — accuracy: {acc:.4f}")
-        st.write("## Classification report")
-        st.text(report)
+    st.write("**Confusion Matrix:**")
+    fig, ax = plt.subplots(figsize=(4,3))
+    im = ax.imshow(cm, cmap="Blues")
+    ax.set_xlabel("Predicted")
+    ax.set_ylabel("True")
+    for (i, j), val in np.ndenumerate(cm):
+        ax.text(j, i, int(val), ha='center', va='center', color='black')
+    plt.colorbar(im, ax=ax)
+    st.pyplot(fig)
 
-        st.write("## Confusion matrix")
-        fig, ax = plt.subplots(figsize=(4,3))
-        im = ax.imshow(cm, cmap="Blues")
-        ax.set_xlabel("Predicted")
-        ax.set_ylabel("True")
-        for (i, j), val in np.ndenumerate(cm):
-            ax.text(j, i, int(val), ha='center', va='center', color='black')
-        plt.colorbar(im, ax=ax)
-        st.pyplot(fig)
+    # ROC AUC if possible
+    if y_prob is not None and len(np.unique(y_test)) == 2:
+        fpr, tpr, thr = roc_curve(y_test, y_prob)
+        roc_auc = auc(fpr, tpr)
+        st.write(f"ROC AUC: {roc_auc:.4f}")
+        fig2, ax2 = plt.subplots(figsize=(5,4))
+        ax2.plot(fpr, tpr, label=f"AUC = {roc_auc:.3f}")
+        ax2.plot([0,1],[0,1], linestyle="--", color="gray")
+        ax2.set_xlabel("FPR")
+        ax2.set_ylabel("TPR")
+        ax2.set_title("ROC Curve")
+        ax2.legend()
+        st.pyplot(fig2)
+    else:
+        st.info("ROC/AUC not available (predict_proba missing or non-binary labels).")
 
-        # ROC plot
-        if y_score is not None and len(np.unique(y_test)) == 2:
-            fpr, tpr, thr = roc_curve(y_test, y_score)
-            roc_auc = auc(fpr, tpr)
-            st.write(f"ROC AUC: {roc_auc:.4f}")
-            fig2, ax2 = plt.subplots(figsize=(5,4))
-            ax2.plot(fpr, tpr, label=f"AUC = {roc_auc:.3f}")
-            ax2.plot([0,1],[0,1], linestyle="--", color="gray")
-            ax2.set_xlabel("FPR")
-            ax2.set_ylabel("TPR")
-            ax2.set_title("ROC Curve")
-            ax2.legend()
-            st.pyplot(fig2)
-        else:
-            st.info("ROC/AUC not shown (predict_proba/decision_function unavailable or non-binary labels).")
+    # Offer model download (save scaler, model, feature names)
+    export_obj = {
+        "model": model,
+        "scaler": scaler,
+        "feature_columns": list(X.columns)
+    }
 
-        # Show model coefficients (optional)
-        coef_btn = st.checkbox("Show model coefficients", value=False)
-        if coef_btn:
-            coefs = model.coef_.ravel()
-            coef_df = pd.DataFrame({"feature": chosen_features, "coefficient": coefs})
-            coef_df = coef_df.sort_values("coefficient", key=lambda col: np.abs(col), ascending=False)
-            st.write(coef_df)
+    buffer = BytesIO()
+    joblib.dump(export_obj, buffer)
+    buffer.seek(0)
+    b64 = base64.b64encode(buffer.read()).decode()
 
-        # -------------------------
-        # Export model (.pkl) - save scaler, model, feature list in a dict
-        # -------------------------
-        export_obj = {
-            "scaler": scaler,
-            "model": model,
-            "features": chosen_features
-        }
+    st.subheader("Download trained model (.pkl)")
+    suggested_name = "logistic_regression_model.pkl"
+    pkl_name = st.text_input("Filename for download", value=suggested_name)
+    if not pkl_name.endswith(".pkl"):
+        pkl_name = pkl_name + ".pkl"
 
-        buffer = BytesIO()
-        joblib.dump(export_obj, buffer)
-        buffer.seek(0)
-        b64 = base64.b64encode(buffer.read()).decode()
+    href = f'<a href="data:application/octet-stream;base64,{b64}" download="{pkl_name}">Click here to download the trained model (.pkl)</a>'
+    st.markdown(href, unsafe_allow_html=True)
 
-        st.write("## Download trained model")
-        pkl_name = st.text_input("Filename for download (must end with .pkl)", value="damage_model.pkl")
-        if not pkl_name.endswith(".pkl"):
-            pkl_name = pkl_name + ".pkl"
-
-        href = f'<a href="data:application/octet-stream;base64,{b64}" download="{pkl_name}">Click here to download the trained model (.pkl)</a>'
-        st.markdown(href, unsafe_allow_html=True)
-
-        # Show usage snippet
-        st.write("---")
-        st.write("### Example: load & use the saved object")
-        st.code(f"""import joblib
-obj = joblib.load("{pkl_name}")   # dict with keys: 'scaler','model','features'
-scaler = obj['scaler']
-model = obj['model']
-features = obj['features']
-# X_new must be a 2D array with columns in the same order as 'features'
-X_new_scaled = scaler.transform(X_new)
-y_pred = model.predict(X_new_scaled)
-y_prob = model.predict_proba(X_new_scaled)[:,1]  # if available""")
+    st.info("Saved object contains keys: 'model' (sklearn LogisticRegression), 'scaler' (StandardScaler or None), 'feature_columns' (list).")
